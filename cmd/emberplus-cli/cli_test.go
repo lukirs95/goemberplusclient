@@ -1,6 +1,7 @@
 package main
 
 import (
+	"fmt"
 	"net"
 	"slices"
 	"strings"
@@ -53,16 +54,20 @@ type command struct {
 	id     int32
 	args   []glow.Value
 	value  glow.Value // value of a SetValue request
+	conn   *glow.Connection
 }
 
-// provider answers GetDirectory from testTree and records all commands.
+// provider answers GetDirectory from its tree and records all commands.
 type provider struct {
 	conn net.Conn
 	wmu  sync.Mutex
 	enc  *s101.Encoder
+	tree []glow.Element
 
 	mu       sync.Mutex
 	commands []command
+	sources  map[string][]uint32 // current sources per "matrix/target"
+	locked   uint32              // target that refuses connects
 }
 
 func (p *provider) recorded() []command {
@@ -78,6 +83,32 @@ func (p *provider) send(els ...glow.Element) {
 	p.wmu.Lock()
 	defer p.wmu.Unlock()
 	s101.Split(s101.Frame{Message: s101.MessageEmBER, Version: s101.VersionS101, DTD: s101.DTDGlow}, payload, p.enc.WriteFrame)
+}
+
+// connect applies a connect request and reports the resulting connection.
+func (p *provider) connect(path glow.Path, req glow.Connection) {
+	key := fmt.Sprintf("%v/%d", path, req.Target)
+	p.mu.Lock()
+	current := p.sources[key]
+	reply := glow.Connection{Target: req.Target, Disposition: glow.Modified}
+	switch {
+	case req.Target == p.locked:
+		reply.Disposition = glow.Locked
+	case req.Operation == glow.OpConnect:
+		for _, s := range req.Sources {
+			if !slices.Contains(current, s) {
+				current = append(slices.Clone(current), s)
+			}
+		}
+	case req.Operation == glow.OpDisconnect:
+		current = slices.DeleteFunc(slices.Clone(current), func(s uint32) bool { return slices.Contains(req.Sources, s) })
+	default:
+		current = req.Sources
+	}
+	p.sources[key] = current
+	reply.Sources = slices.Clone(current)
+	p.mu.Unlock()
+	p.send(&glow.Matrix{Path: path, Connections: []glow.Connection{reply}})
 }
 
 func (p *provider) sendResult(id int32, ok, withResult bool) {
@@ -113,6 +144,10 @@ func (p *provider) serve(requests <-chan command) {
 			p.sendResult(r.id, !slices.Equal(r.args, []glow.Value{glow.Int(99)}), slices.Equal(r.path, glow.Path{1, 3}))
 			continue
 		case 0:
+			if r.conn != nil {
+				p.connect(r.path, *r.conn)
+				continue
+			}
 			// Values above 10 are rejected: the provider keeps -6.
 			v := r.value
 			if real, ok := v.(glow.Real); ok && real > 10 {
@@ -125,13 +160,13 @@ func (p *provider) serve(requests <-chan command) {
 			continue
 		}
 		var answer []glow.Element
-		for _, el := range testTree {
+		for _, el := range p.tree {
 			if slices.Equal(el.ElementPath().Parent(), r.path) {
 				answer = append(answer, el)
 			}
 		}
 		if len(answer) == 0 {
-			for _, el := range testTree {
+			for _, el := range p.tree {
 				if slices.Equal(el.ElementPath(), r.path) {
 					answer = append(answer, el)
 				}
@@ -156,8 +191,11 @@ func (p *provider) read(requests chan<- command) {
 			// A request without command is a value change.
 			if msg, err := glow.Decode(payload); err == nil {
 				for _, el := range msg.(glow.Elements) {
-					if par, ok := el.(*glow.Parameter); ok {
-						cmds = append(cmds, command{path: par.Path, value: par.Value})
+					switch e := el.(type) {
+					case *glow.Parameter:
+						cmds = append(cmds, command{path: e.Path, value: e.Value})
+					case *glow.Matrix:
+						cmds = append(cmds, command{path: e.Path, conn: &e.Connections[0]})
 					}
 				}
 			}
@@ -238,8 +276,20 @@ func parseCommands(payload []byte) []command {
 // to the returned channel instead of a running program.
 func start(t *testing.T) (model, *provider, chan tea.Msg) {
 	t.Helper()
+	return startWith(t, testTree)
+}
+
+func startWith(t *testing.T, tree []glow.Element) (model, *provider, chan tea.Msg) {
+	t.Helper()
 	server, client := net.Pipe()
-	p := &provider{conn: server, enc: s101.NewEncoder(server)}
+	p := &provider{conn: server, enc: s101.NewEncoder(server), tree: tree, sources: map[string][]uint32{}, locked: 99}
+	for _, el := range tree {
+		if m, ok := el.(*glow.Matrix); ok {
+			for _, c := range m.Connections {
+				p.sources[fmt.Sprintf("%v/%d", m.Path, c.Target)] = c.Sources
+			}
+		}
+	}
 	requests := make(chan command, 100)
 	go p.read(requests)
 	go p.serve(requests)
@@ -285,7 +335,8 @@ func update(t *testing.T, m model, msg tea.Msg) model {
 func press(t *testing.T, m model, keys ...string) model {
 	t.Helper()
 	special := map[string]tea.KeyType{"up": tea.KeyUp, "down": tea.KeyDown, "left": tea.KeyLeft, "right": tea.KeyRight,
-		"enter": tea.KeyEnter, "esc": tea.KeyEsc, "ctrl+u": tea.KeyCtrlU}
+		"enter": tea.KeyEnter, "esc": tea.KeyEsc, "ctrl+u": tea.KeyCtrlU, "ctrl+f": tea.KeyCtrlF, "ctrl+b": tea.KeyCtrlB,
+		"pgdown": tea.KeyPgDown, "pgup": tea.KeyPgUp, "shift+right": tea.KeyShiftRight, "shift+left": tea.KeyShiftLeft}
 	for _, k := range keys {
 		msg := tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune(k)}
 		if kt, ok := special[k]; ok {

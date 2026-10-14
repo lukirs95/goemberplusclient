@@ -39,6 +39,10 @@ func (m model) View() string {
 		treeWidth = m.width - detailsWidth
 	}
 	h := m.treeHeight()
+	if m.mode == modeMatrix {
+		body := lipgloss.NewStyle().Width(m.width).Height(h).MaxHeight(h).Render(m.matrixView())
+		return lipgloss.JoinVertical(lipgloss.Left, header, body, m.statusView())
+	}
 	tree := lipgloss.NewStyle().Width(treeWidth).Height(h).MaxHeight(h).Render(m.treeView(treeWidth, h))
 	body := tree
 	if detailsWidth > 0 {
@@ -290,6 +294,7 @@ func (m model) detailsView(width int) string {
 		if e.TargetCount != nil && e.SourceCount != nil {
 			field("Size", fmt.Sprintf("%d targets × %d sources", *e.TargetCount, *e.SourceCount))
 		}
+		field("Crosspoints", "press e")
 		if len(e.Connections) > 0 {
 			var conns []string
 			for _, c := range e.Connections {
@@ -333,6 +338,10 @@ func signature(f *glow.Function) string {
 func (m model) statusView() string {
 	help := "↑↓/jk move  →/l open  ←/h close  space toggle  e edit/invoke  s subscribe  r reload  q quit"
 	switch {
+	case m.mode == modeMatrix && m.status == "":
+		return dimStyle.Render("↑↓←→/hjkl move  space/b page ↓↑  L/H page →←  g/G 0/$ first/last  enter connect  esc back")
+	case m.mode == modeMatrix:
+		return m.status
 	case m.mode != modeBrowse:
 		return m.editView()
 	case m.closed != nil:

@@ -20,6 +20,7 @@ const (
 	modeInput        // text input for a parameter value or function argument
 	modeEnum         // selection of an enum entry
 	modeConfirm      // y/N question
+	modeMatrix       // crosspoint view of a matrix
 )
 
 // editState describes an edit in progress.
@@ -75,6 +76,8 @@ func (m *model) beginEdit() tea.Cmd {
 	case *glow.Function:
 		m.edit = &editState{node: n, fn: el}
 		return m.nextArgument()
+	case *glow.Matrix:
+		return m.openMatrix(n)
 	}
 	return nil
 }

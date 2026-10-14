@@ -102,7 +102,7 @@ To build it from source, run `make build`; the binary is placed in `bin/`.
 |---|---|
 | `↑` `↓` / `k` `j` | move |
 | `→` / `l` | open a node, or move to its first child |
-| `e` / `Enter` | edit a parameter or invoke a function (`Enter` opens nodes) |
+| `e` / `Enter` | edit a parameter, invoke a function or show the crosspoints of a matrix (`Enter` opens nodes) |
 | `←` / `h` | close a node, or move to its parent |
 | `Space` | open or close a node |
 | `g` `G`, `PgUp` `PgDn` | jump |
@@ -116,6 +116,20 @@ from a list, booleans are toggled and triggers are fired after a confirmation.
 Functions ask for each argument; functions without arguments ask for a
 confirmation. The status line shows the value the provider confirmed or the
 result of the invocation.
+
+The crosspoint view of a matrix shows sources as rows and targets as columns,
+with labels if the matrix reports them. `Enter` connects or disconnects the
+selected crosspoint: matrices with one source per target replace the source,
+N:N matrices add or remove it. `Esc` returns to the tree.
+
+| Key | Action in the crosspoint view |
+|---|---|
+| `↑` `↓` `←` `→` / `k` `j` `h` `l` | move |
+| `Space`, `PgDn`, `Ctrl+F` / `b`, `PgUp`, `Ctrl+B` | one page of sources down / up |
+| `L`, `Shift+→` / `H`, `Shift+←` | one page of targets right / left |
+| `g` / `G` | first / last source |
+| `0` / `$` | first / last target |
+| `Enter` | connect or disconnect |
 
 The CLI is a separate Go module, so its dependencies
 ([Bubble Tea](https://github.com/charmbracelet/bubbletea) and

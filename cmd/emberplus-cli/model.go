@@ -51,8 +51,9 @@ type model struct {
 	status  string
 	closed  error
 
-	mode mode
-	edit *editState
+	mode   mode
+	edit   *editState
+	matrix *matrixState
 }
 
 type childrenMsg struct {
@@ -208,6 +209,10 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.handleResult(msg)
 		return m, nil
 
+	case matrixLoadedMsg, connectMsg:
+		m.handleMatrix(msg)
+		return m, nil
+
 	case subscribedMsg:
 		switch {
 		case msg.err != nil:
@@ -229,7 +234,10 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 }
 
 func (m model) key(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
-	if m.mode != modeBrowse {
+	switch m.mode {
+	case modeMatrix:
+		return m.matrixKey(msg)
+	case modeInput, modeEnum, modeConfirm:
 		return m.editKey(msg)
 	}
 	m.status = ""
