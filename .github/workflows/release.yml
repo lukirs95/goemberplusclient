@@ -1,0 +1,26 @@
+name: Release
+
+# Pushing a tag such as v0.1.0 builds emberplus-cli for all platforms and
+# attaches the archives to a GitHub release of that tag.
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache-dependency-path: cmd/emberplus-cli/go.sum
+      - run: make test
+      - run: make dist VERSION=${{ github.ref_name }}
+      - name: Create release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "${{ github.ref_name }}" dist/* --title "${{ github.ref_name }}" --generate-notes

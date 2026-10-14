@@ -1,0 +1,7 @@
+# Local reference material (specification excerpt, network captures)
+docs/
+.DS_Store
+.vscode
+# Build output
+bin/
+dist/
