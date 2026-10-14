@@ -12,6 +12,10 @@ the standard library.
 go get github.com/lukirs95/goemberplusclient
 ```
 
+## Demo application that uses this library can be downloaded here
+
+![emberplus-cli demo](demo/demo.gif)
+
 ## Usage
 
 ```go
