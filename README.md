@@ -1,5 +1,9 @@
 # goemberplusclient
 
+[![CI](https://github.com/lukirs95/goemberplusclient/actions/workflows/ci.yml/badge.svg)](https://github.com/lukirs95/goemberplusclient/actions/workflows/ci.yml)
+[![Latest release](https://img.shields.io/github/v/release/lukirs95/goemberplusclient)](https://github.com/lukirs95/goemberplusclient/releases/latest)
+[![Go Reference](https://pkg.go.dev/badge/github.com/lukirs95/goemberplusclient.svg)](https://pkg.go.dev/github.com/lukirs95/goemberplusclient)
+
 An [Ember+](https://github.com/Lawo/ember-plus) consumer (client) for Go.
 
 Ember+ is a control protocol for broadcast equipment. A *provider* (usually a
