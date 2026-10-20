@@ -2,9 +2,11 @@ package emberplus
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"slices"
 	"strings"
+	"time"
 
 	"github.com/lukirs95/goemberplusclient/pkg/glow"
 )
@@ -16,16 +18,24 @@ type dirRequest struct {
 	err     error
 	waiting int
 	w       *waiter
+
+	// The fields below are used while the request settles: the first child
+	// has been reported and more may follow in separate messages.
+	answered  bool
+	lastChild time.Time
+	timer     *time.Timer
 }
 
 // GetDirectory requests the children of a node, or the element itself for
 // parameters, matrices and functions, and returns a snapshot from the
 // mirror. For the root, path is "".
 //
-// The request is answered by the first message that reports a child of a
-// node (or the node without properties, meaning it has no children). If a
-// provider spreads the children of a node over several messages, the
-// snapshot may be incomplete; later messages still update the mirror. A
+// The children of a node are complete once no further child has been
+// reported for the settle time set with WithDirectorySettle, since providers
+// may report each child in a separate message. A node without properties
+// means that it has no children. Children reported even later still update
+// the mirror; WatchChildren reports them. If the context expires while the
+// children settle, the snapshot holds the children reported so far. A
 // matrix is answered once a connection is known for every target.
 func (c *Client) GetDirectory(ctx context.Context, path string) ([]glow.Element, error) {
 	ctx, cancel := c.withTimeout(ctx)
@@ -64,9 +74,29 @@ func (c *Client) loadDirectory(ctx context.Context, p glow.Path) error {
 		if len(p) == 0 {
 			kind = glow.KindUnknown
 		}
+		match := c.directoryMatcher(p, kind)
 		req.w = &waiter{
-			match: c.directoryMatcher(p, kind),
+			match: func(msg glow.Message) bool {
+				switch match(msg) {
+				case dirComplete:
+					return true
+				case dirChild:
+					settle := c.cfg.directorySettle
+					if settle <= 0 {
+						return true
+					}
+					req.answered = true
+					req.lastChild = time.Now()
+					if req.timer == nil {
+						req.timer = time.AfterFunc(settle, func() { c.settle(key, req) })
+					}
+				}
+				return false
+			},
 			fire: func() {
+				if req.timer != nil {
+					req.timer.Stop()
+				}
 				if e := c.tree.lookup(p); e != nil {
 					e.loaded = true
 				}
@@ -107,55 +137,97 @@ func (c *Client) loadDirectory(ctx context.Context, p glow.Path) error {
 		return c.Err()
 	case <-ctx.Done():
 		c.mu.Lock()
+		defer c.mu.Unlock()
 		req.waiting--
+		if c.dirs[key] != req {
+			// Answered meanwhile.
+			return req.err
+		}
+		// Children have been reported, only more may follow: the deadline
+		// ends the request with what is known.
+		if req.answered && errors.Is(ctx.Err(), context.DeadlineExceeded) {
+			if req.waiting == 0 {
+				c.removeWaiter(req.w)
+				req.w.fire()
+			}
+			return nil
+		}
 		// Without anyone waiting, a later request must be sent again instead
 		// of waiting for an answer that may never come.
-		if req.waiting == 0 && c.dirs[key] == req {
+		if req.waiting == 0 {
+			if req.timer != nil {
+				req.timer.Stop()
+			}
 			delete(c.dirs, key)
 			c.removeWaiter(req.w)
 		}
-		c.mu.Unlock()
 		return fmt.Errorf("emberplus: GetDirectory %q: %w", key, ctx.Err())
 	}
 }
 
+// settle completes req once no child has been reported for the settle time.
+// It runs on req's timer.
+func (c *Client) settle(key string, req *dirRequest) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.dirs[key] != req {
+		return
+	}
+	if wait := c.cfg.directorySettle - time.Since(req.lastChild); wait > 0 {
+		req.timer.Reset(wait)
+		return
+	}
+	c.removeWaiter(req.w)
+	req.w.fire()
+}
+
+// dirMatch is how a message relates to a GetDirectory in flight.
+type dirMatch int
+
+const (
+	dirNone     dirMatch = iota
+	dirChild             // reports a child of the node; more may follow
+	dirComplete          // answers the request
+)
+
 // directoryMatcher returns the rule that recognizes the answer to a
 // GetDirectory on p. It runs with c.mu held, after the message was applied.
-func (c *Client) directoryMatcher(p glow.Path, kind glow.ElementKind) func(glow.Message) bool {
-	return func(msg glow.Message) bool {
+func (c *Client) directoryMatcher(p glow.Path, kind glow.ElementKind) func(glow.Message) dirMatch {
+	return func(msg glow.Message) dirMatch {
 		els, ok := msg.(glow.Elements)
 		if !ok {
-			return false
+			return dirNone
 		}
+		result := dirNone
 		for _, el := range els {
 			ep := el.ElementPath()
 			switch kind {
 			case glow.KindUnknown: // root
 				if len(ep) == 1 {
-					return true
+					result = dirChild
 				}
 			case glow.KindNode:
 				if slices.Equal(ep.Parent(), p) {
-					return true
+					result = dirChild
 				}
 				if slices.Equal(ep, p) {
 					// Either the node has no children, or the path
 					// turned out not to be a node.
 					if n, ok := el.(*glow.Node); !ok || n.IsEmpty() {
-						return true
+						return dirComplete
 					}
 				}
 			case glow.KindMatrix:
 				if m, ok := el.(*glow.Matrix); ok && slices.Equal(ep, p) && c.matrixComplete(p, m) {
-					return true
+					return dirComplete
 				}
 			default:
 				if slices.Equal(ep, p) {
-					return true
+					return dirComplete
 				}
 			}
 		}
-		return false
+		return result
 	}
 }
 

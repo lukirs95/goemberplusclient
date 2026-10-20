@@ -214,6 +214,67 @@ func TestWatchLoadsParent(t *testing.T) {
 	}
 }
 
+func TestWatchChildren(t *testing.T) {
+	p, c := startControl(t)
+	ctx := testContext(t)
+	if _, err := c.Children(ctx, "root"); err != nil {
+		t.Fatal(err)
+	}
+	events := make(chan Event, 10)
+	stop, err := c.WatchChildren(ctx, "root", func(e Event) { events <- e })
+	if err != nil {
+		t.Fatal(err)
+	}
+	top := make(chan Event, 10)
+	stopTop, err := c.WatchChildren(ctx, "", func(e Event) { top <- e })
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer stopTop()
+
+	// Changes of known children are no new children.
+	p.send(&glow.Parameter{Path: glow.Path{1, 1}, Value: glow.Real(1)})
+	p.send(&glow.Parameter{Path: glow.Path{1, 6}, Identifier: new("late"), Value: glow.Int(3)})
+	select {
+	case e := <-events:
+		if el := e.Element.(*glow.Parameter); *el.Identifier != "late" || el.Value != glow.Int(3) {
+			t.Fatalf("element %+v", el)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("no event")
+	}
+	select {
+	case e := <-events:
+		t.Fatalf("unexpected event %+v", e.Element)
+	case <-time.After(50 * time.Millisecond):
+	}
+	if ch, _ := c.Children(ctx, "root"); len(ch) != 6 {
+		t.Fatalf("%d children", len(ch))
+	}
+
+	p.send(&glow.Node{Path: glow.Path{2}, Identifier: new("second")})
+	select {
+	case e := <-top:
+		if *e.Element.(*glow.Node).Identifier != "second" {
+			t.Fatalf("element %+v", e.Element)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("no event for the root")
+	}
+
+	stop()
+	p.send(&glow.Parameter{Path: glow.Path{1, 7}, Identifier: new("later")})
+	select {
+	case e := <-events:
+		t.Fatalf("event after stop: %+v", e)
+	case <-time.After(50 * time.Millisecond):
+	}
+
+	if _, err := c.WatchChildren(ctx, "root/gain", func(Event) {}); !errors.Is(err, ErrWrongType) {
+		t.Fatalf("parameter: %v", err)
+	}
+}
+
 func TestWatchMatrixLoadsMatrix(t *testing.T) {
 	p, c := startControl(t)
 	ctx := testContext(t)

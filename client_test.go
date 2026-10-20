@@ -308,6 +308,128 @@ func TestGetDirectoryTimeout(t *testing.T) {
 	}
 }
 
+// separateMessages answers GetDirectory like staticTree, but reports each
+// child in a message of its own, as some providers do.
+func separateMessages(gap time.Duration, elems ...glow.Element) func(p *fakeProvider, i int, r request) {
+	return func(p *fakeProvider, _ int, r request) {
+		if r.number != glow.CmdGetDirectory {
+			return
+		}
+		for _, el := range elems {
+			if slices.Equal(el.ElementPath().Parent(), r.path) {
+				p.send(el)
+				time.Sleep(gap)
+			}
+		}
+	}
+}
+
+func TestGetDirectorySeparateMessages(t *testing.T) {
+	_, c := startFake(t, separateMessages(10*time.Millisecond,
+		&glow.Node{Path: glow.Path{0}, Identifier: new("Device")},
+		&glow.Parameter{Path: glow.Path{0, 0}, Identifier: new("Hardware Name")},
+		&glow.Parameter{Path: glow.Path{0, 1}, Identifier: new("Software Version")},
+		&glow.Node{Path: glow.Path{0, 6}, Identifier: new("Management")},
+		&glow.Node{Path: glow.Path{0, 100}, Identifier: new("Texts and Tallies")},
+	))
+	els, err := c.GetDirectory(testContext(t), "Device")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var ids []string
+	for _, el := range els {
+		ids = append(ids, *identifierOf(el))
+	}
+	if want := []string{"Hardware Name", "Software Version", "Management", "Texts and Tallies"}; !slices.Equal(ids, want) {
+		t.Fatalf("got %q, want %q", ids, want)
+	}
+}
+
+func TestGetDirectorySettleDisabled(t *testing.T) {
+	p, c := startFake(t, nil, WithDirectorySettle(0))
+	res := result(func() ([]glow.Element, error) { return c.GetDirectory(testContext(t), "") })
+	p.expect()
+	p.send(&glow.Node{Path: glow.Path{1}})
+	if r := <-res; r.err != nil || len(r.v) != 1 {
+		t.Fatalf("got %+v, %v", r.v, r.err)
+	}
+}
+
+func TestGetDirectoryDeadlineWhileSettling(t *testing.T) {
+	p, c := startFake(t, nil, WithDirectorySettle(time.Hour))
+	ctx, cancel := context.WithTimeout(t.Context(), 200*time.Millisecond)
+	defer cancel()
+	res := result(func() ([]glow.Element, error) { return c.GetDirectory(ctx, "") })
+	p.expect()
+	p.send(&glow.Node{Path: glow.Path{1}, Identifier: new("root")})
+	// The deadline ends the request with the children reported so far.
+	if r := <-res; r.err != nil || len(r.v) != 1 {
+		t.Fatalf("got %+v, %v", r.v, r.err)
+	}
+	c.mu.Lock()
+	inFlight := len(c.dirs)
+	c.mu.Unlock()
+	if inFlight != 0 {
+		t.Fatalf("%d requests in flight", inFlight)
+	}
+	// The directory counts as loaded.
+	if _, err := c.Children(testContext(t), ""); err != nil {
+		t.Fatal(err)
+	}
+	p.expectNone(50 * time.Millisecond)
+}
+
+func TestGetDirectoryCancelWhileSettling(t *testing.T) {
+	p, c := startFake(t, nil, WithDirectorySettle(time.Hour))
+	ctx, cancel := context.WithCancel(t.Context())
+	res := result(func() ([]glow.Element, error) { return c.GetDirectory(ctx, "") })
+	p.expect()
+	p.send(&glow.Node{Path: glow.Path{1}})
+	waitFor(t, func() bool {
+		c.mu.Lock()
+		defer c.mu.Unlock()
+		return c.dirs[""] != nil && c.dirs[""].answered
+	})
+	cancel()
+	if r := <-res; !errors.Is(r.err, context.Canceled) {
+		t.Fatalf("got %v", r.err)
+	}
+	// The abandoned request must not swallow the next one.
+	res = result(func() ([]glow.Element, error) { return c.GetDirectory(testContext(t), "") })
+	p.expect()
+}
+
+func TestGetDirectoryCloseWhileSettling(t *testing.T) {
+	p, c := startFake(t, nil, WithDirectorySettle(time.Hour))
+	res := result(func() ([]glow.Element, error) { return c.GetDirectory(testContext(t), "") })
+	p.expect()
+	p.send(&glow.Node{Path: glow.Path{1}})
+	waitFor(t, func() bool {
+		c.mu.Lock()
+		defer c.mu.Unlock()
+		return c.dirs[""] != nil && c.dirs[""].answered
+	})
+	c.Close()
+	if r := <-res; !errors.Is(r.err, ErrClosed) {
+		t.Fatalf("got %v", r.err)
+	}
+}
+
+func TestGetDirectoryEmptyNodeDoesNotSettle(t *testing.T) {
+	_, c := startFake(t, staticTree(deviceTree()...), WithDirectorySettle(time.Hour))
+	// Known elements need no requests to be located.
+	c.handle(glow.Elements(deviceTree()))
+	ctx, cancel := context.WithTimeout(t.Context(), 2*time.Second)
+	defer cancel()
+	// Parameters and empty nodes are complete with their answer.
+	if els, err := c.GetDirectory(ctx, "1.1"); err != nil || len(els) != 0 {
+		t.Fatalf("gpio: %+v, %v", els, err)
+	}
+	if els, err := c.GetDirectory(ctx, "1.2.1"); err != nil || len(els) != 1 {
+		t.Fatalf("gain.left: %+v, %v", els, err)
+	}
+}
+
 func TestMatrixDirectory(t *testing.T) {
 	matrix := &glow.Matrix{Path: glow.Path{1, 1}, Identifier: new("inputs"), TargetCount: new(int32(4)), SourceCount: new(int32(1))}
 	static := staticTree(&glow.Node{Path: glow.Path{1}, Identifier: new("gpio")}, matrix)

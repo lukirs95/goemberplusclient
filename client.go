@@ -30,6 +30,7 @@ type config struct {
 	keepAliveIdle    time.Duration
 	keepAliveTimeout time.Duration
 	requestTimeout   time.Duration
+	directorySettle  time.Duration
 	logger           *slog.Logger
 }
 
@@ -57,6 +58,16 @@ func WithRequestTimeout(d time.Duration) Option {
 	return func(c *config) { c.requestTimeout = d }
 }
 
+// WithDirectorySettle sets how long GetDirectory waits for further children
+// of a node after the last one was reported. Providers may report each child
+// in a separate message, and Ember+ does not mark the end of a directory. The
+// default is 50 ms. A duration of 0 completes GetDirectory with the first
+// message reporting a child, which is faster for providers that report all
+// children at once but may return an incomplete snapshot otherwise.
+func WithDirectorySettle(d time.Duration) Option {
+	return func(c *config) { c.directorySettle = d }
+}
+
 // WithLogger sets the logger for protocol errors that do not close the
 // connection, such as undecodable messages. By default nothing is logged.
 func WithLogger(l *slog.Logger) Option {
@@ -78,8 +89,10 @@ type Client struct {
 	waiters  []*waiter
 	dirs     map[string]*dirRequest
 	watchers map[string][]*watcher
-	subs     map[string]int
-	err      error
+	// childWatchers are keyed by the path of the parent.
+	childWatchers map[string][]*watcher
+	subs          map[string]int
+	err           error
 
 	events       *dispatcher
 	invocationID atomic.Int32
@@ -105,6 +118,7 @@ func NewClient(conn io.ReadWriteCloser, opts ...Option) *Client {
 		keepAliveIdle:    5 * time.Second,
 		keepAliveTimeout: 5 * time.Second,
 		requestTimeout:   10 * time.Second,
+		directorySettle:  50 * time.Millisecond,
 		logger:           slog.New(slog.DiscardHandler),
 	}
 	for _, opt := range opts {
@@ -121,12 +135,13 @@ func NewClient(conn io.ReadWriteCloser, opts ...Option) *Client {
 			DTD:      s101.DTDGlow,
 			AppBytes: glowVersion,
 		},
-		tree:     newTree(),
-		dirs:     map[string]*dirRequest{},
-		watchers: map[string][]*watcher{},
-		subs:     map[string]int{},
-		events:   newDispatcher(),
-		done:     make(chan struct{}),
+		tree:          newTree(),
+		dirs:          map[string]*dirRequest{},
+		watchers:      map[string][]*watcher{},
+		childWatchers: map[string][]*watcher{},
+		subs:          map[string]int{},
+		events:        newDispatcher(),
+		done:          make(chan struct{}),
 	}
 	c.lastRecv.Store(time.Now().UnixNano())
 	go c.readLoop()
@@ -226,8 +241,13 @@ func (c *Client) handle(msg glow.Message) {
 	switch m := msg.(type) {
 	case glow.Elements:
 		for _, el := range m {
+			known := c.tree.lookup(el.ElementPath())
+			isNew := known == nil || known.el == nil
 			if e := c.tree.apply(el); e != nil {
 				c.notify(e, el)
+				if isNew {
+					c.notifyChild(e, el)
+				}
 			}
 		}
 	case glow.Streams:

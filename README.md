@@ -55,6 +55,7 @@ The client offers:
 | `Invoke` | call a function |
 | `Connect` | change matrix crosspoints |
 | `Watch` | receive changes of an element |
+| `WatchChildren` | receive children that a provider reports after their directory was loaded |
 | `Subscribe` | start a stream parameter such as a level meter |
 
 All methods are safe for concurrent use. See the

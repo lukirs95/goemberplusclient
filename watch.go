@@ -59,10 +59,37 @@ func (c *Client) Watch(ctx context.Context, path string, fn func(Event)) (stop f
 		}
 	}
 
-	w := &watcher{fn: fn}
-	key := p.String()
+	return c.addWatcher(c.watchers, p.String(), fn), nil
+}
+
+// WatchChildren calls fn for every child of the node at path that is
+// reported for the first time after the call, such as children that a
+// provider reports after GetDirectory completed or adds later. For the root,
+// path is "". Event.Element is a snapshot of the new child. WatchChildren
+// sends no request: only children of nodes whose directory is loaded are
+// reported. fn is called as described for Watch.
+func (c *Client) WatchChildren(ctx context.Context, path string, fn func(Event)) (stop func(), err error) {
+	ctx, cancel := c.withTimeout(ctx)
+	defer cancel()
+	p, err := c.locate(ctx, path)
+	if err != nil {
+		return nil, err
+	}
 	c.mu.Lock()
-	c.watchers[key] = append(c.watchers[key], w)
+	el := c.tree.lookup(p).el
+	c.mu.Unlock()
+	if _, ok := el.(*glow.Node); !ok && len(p) > 0 {
+		return nil, fmt.Errorf("%w: %q is a %T, not a node", ErrWrongType, path, el)
+	}
+	return c.addWatcher(c.childWatchers, p.String(), fn), nil
+}
+
+// addWatcher registers fn in watchers under key and returns its stop
+// function.
+func (c *Client) addWatcher(watchers map[string][]*watcher, key string, fn func(Event)) func() {
+	w := &watcher{fn: fn}
+	c.mu.Lock()
+	watchers[key] = append(watchers[key], w)
 	c.mu.Unlock()
 	var once sync.Once
 	return func() {
@@ -70,7 +97,7 @@ func (c *Client) Watch(ctx context.Context, path string, fn func(Event)) (stop f
 			w.stopped.Store(true)
 			c.mu.Lock()
 			defer c.mu.Unlock()
-			ws := c.watchers[key]
+			ws := watchers[key]
 			for i, x := range ws {
 				if x == w {
 					ws = append(ws[:i], ws[i+1:]...)
@@ -78,17 +105,26 @@ func (c *Client) Watch(ctx context.Context, path string, fn func(Event)) (stop f
 				}
 			}
 			if len(ws) == 0 {
-				delete(c.watchers, key)
+				delete(watchers, key)
 			} else {
-				c.watchers[key] = ws
+				watchers[key] = ws
 			}
 		})
-	}, nil
+	}
 }
 
 // notify queues an event for the watchers of e. Callers must hold c.mu.
 func (c *Client) notify(e *entry, update glow.Element) {
-	ws := c.watchers[update.ElementPath().String()]
+	c.queue(c.watchers[update.ElementPath().String()], e, update)
+}
+
+// notifyChild queues an event for the child watchers of the parent of e,
+// which was reported for the first time. Callers must hold c.mu.
+func (c *Client) notifyChild(e *entry, update glow.Element) {
+	c.queue(c.childWatchers[update.ElementPath().Parent().String()], e, update)
+}
+
+func (c *Client) queue(ws []*watcher, e *entry, update glow.Element) {
 	if len(ws) == 0 {
 		return
 	}

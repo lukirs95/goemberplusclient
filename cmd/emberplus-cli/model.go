@@ -28,7 +28,7 @@ type node struct {
 	expanded bool
 	loaded   bool
 	loading  bool
-	stops    []func() // watches of the children while expanded
+	stops    []func() // watches of the children while expanded, including new children
 }
 
 func (n *node) isContainer() bool {
@@ -70,6 +70,13 @@ type watchesMsg struct {
 
 type updateMsg struct{ el glow.Element }
 
+// childMsg reports a child that the provider reported after the directory
+// of parent was loaded.
+type childMsg struct {
+	parent string
+	el     glow.Element
+}
+
 type subscribedMsg struct {
 	path        string
 	unsubscribe func() error
@@ -107,28 +114,50 @@ func (m model) loadChildren(path string) tea.Cmd {
 }
 
 // watchChildren watches parameters and nodes below path so that their
-// changes appear while path is expanded. It never subscribes to streams.
+// changes appear while path is expanded, and path itself for children
+// reported later. It never subscribes to streams.
 func (m model) watchChildren(path string, children []glow.Element) tea.Cmd {
 	return func() tea.Msg {
 		ctx, cancel := m.context()
 		defer cancel()
-		var stops []func()
-		for _, el := range children {
-			switch el.(type) {
-			case *glow.Parameter, *glow.Node:
-			default:
-				continue
-			}
-			stop, err := m.app.client.Watch(ctx, el.ElementPath().String(), func(e emberplus.Event) {
-				m.app.send(updateMsg{e.Element})
-			})
-			if err != nil {
-				return watchesMsg{path: path, stops: stops, err: err}
-			}
-			stops = append(stops, stop)
+		stop, err := m.app.client.WatchChildren(ctx, path, func(e emberplus.Event) {
+			m.app.send(childMsg{parent: path, el: e.Element})
+		})
+		if err != nil {
+			return watchesMsg{path: path, err: err}
 		}
-		return watchesMsg{path: path, stops: stops}
+		stops, err := m.watchElements(ctx, children)
+		return watchesMsg{path: path, stops: append(stops, stop), err: err}
 	}
+}
+
+// watchAdded watches a child reported after the directory of path was loaded.
+func (m model) watchAdded(path string, el glow.Element) tea.Cmd {
+	return func() tea.Msg {
+		ctx, cancel := m.context()
+		defer cancel()
+		stops, err := m.watchElements(ctx, []glow.Element{el})
+		return watchesMsg{path: path, stops: stops, err: err}
+	}
+}
+
+func (m model) watchElements(ctx context.Context, els []glow.Element) ([]func(), error) {
+	var stops []func()
+	for _, el := range els {
+		switch el.(type) {
+		case *glow.Parameter, *glow.Node:
+		default:
+			continue
+		}
+		stop, err := m.app.client.Watch(ctx, el.ElementPath().String(), func(e emberplus.Event) {
+			m.app.send(updateMsg{e.Element})
+		})
+		if err != nil {
+			return stops, err
+		}
+		stops = append(stops, stop)
+	}
+	return stops, nil
 }
 
 func (m model) waitDisconnect() tea.Cmd {
@@ -202,6 +231,17 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case updateMsg:
 		if n := m.nodes[msg.el.ElementPath().String()]; n != nil {
 			n.el = msg.el
+		}
+		return m, nil
+
+	case childMsg:
+		n := m.nodes[msg.parent]
+		if n == nil || !n.loaded || !m.addChild(n, msg.el) {
+			return m, nil
+		}
+		m.flatten()
+		if n.expanded {
+			return m, m.watchAdded(n.path, msg.el)
 		}
 		return m, nil
 
@@ -325,8 +365,9 @@ func (m *model) expand() tea.Cmd {
 	}
 	n.expanded = true
 	if n.loaded {
+		// The mirror may know children reported while n was closed.
 		m.flatten()
-		return m.watchChildren(n.path, elements(n.children))
+		return m.loadChildren(n.path)
 	}
 	n.loading = true
 	m.flatten()
@@ -406,6 +447,20 @@ func (m *model) setChildren(n *node, els []glow.Element) {
 	n.loaded = true
 }
 
+// addChild appends el to the children of n unless it is known already.
+func (m *model) addChild(n *node, el glow.Element) bool {
+	path := el.ElementPath().String()
+	for _, c := range n.children {
+		if c.path == path {
+			return false
+		}
+	}
+	c := &node{path: path, el: el, parent: n, depth: n.depth + 1}
+	m.nodes[path] = c
+	n.children = append(n.children, c)
+	return true
+}
+
 // flatten rebuilds the visible rows and keeps the cursor on its node.
 func (m *model) flatten() {
 	sel := m.selected()
@@ -442,12 +497,4 @@ func (m *model) scroll() {
 		m.offset = m.cursor - h + 1
 	}
 	m.offset = max(0, min(m.offset, max(0, len(m.rows)-h)))
-}
-
-func elements(nodes []*node) []glow.Element {
-	els := make([]glow.Element, len(nodes))
-	for i, n := range nodes {
-		els[i] = n.el
-	}
-	return els
 }

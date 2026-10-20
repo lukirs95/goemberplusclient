@@ -36,6 +36,7 @@
 // A provider reports changes of all elements below a node once their
 // directory has been loaded. Watch registers a callback for an element and
 // loads what is needed for its changes to be reported.
+// WatchChildren reports children that appear after a directory was loaded.
 //
 // Stream parameters, typically audio level meters, are different: they only
 // report values while subscribed, and usually do so every 50 to 80 ms.
@@ -51,9 +52,9 @@
 // does not stall the connection.
 //
 // Ember+ has no request identifiers except for function invocations.
-// Responses are therefore matched by path: a GetDirectory is answered by the
-// first message reporting children of the requested node, a SetValue by the
-// next value of the parameter. Requests that a provider never answers end
+// Responses are therefore matched by path: a GetDirectory is answered once
+// the children of the requested node have been reported (see
+// WithDirectorySettle), a SetValue by the next value of the parameter. Requests that a provider never answers end
 // when their context ends, or after the timeout set with WithRequestTimeout.
 //
 // # Packages

@@ -439,6 +439,63 @@ func TestLiveUpdate(t *testing.T) {
 	}
 }
 
+func TestLateChild(t *testing.T) {
+	m, p, events := start(t)
+	m = press(t, m, "l") // open root
+	if len(m.rows) != 5 {
+		t.Fatalf("rows %d", len(m.rows))
+	}
+	// A child reported after the directory was loaded appears.
+	p.send(&glow.Node{Path: glow.Path{1, 5}, Identifier: new("late")})
+	select {
+	case msg := <-events:
+		m = update(t, m, msg)
+	case <-time.After(2 * time.Second):
+		t.Fatal("no child event")
+	}
+	if len(m.rows) != 6 || m.label(m.rows[5]) != "late" {
+		t.Fatalf("rows %d:\n%s", len(m.rows), m.View())
+	}
+	// It is watched like the other children.
+	p.send(&glow.Node{Path: glow.Path{1, 5}, Description: new("Late")})
+	select {
+	case msg := <-events:
+		m = update(t, m, msg)
+	case <-time.After(2 * time.Second):
+		t.Fatal("no watch event")
+	}
+	if m.label(m.rows[5]) != "Late" {
+		t.Fatalf("label %q", m.label(m.rows[5]))
+	}
+
+	// Children reported while closed appear when reopened.
+	m = press(t, m, "h") // close root
+	p.send(&glow.Node{Path: glow.Path{1, 6}, Identifier: new("later")})
+	waitMirror(t, m, "root/later")
+	m = press(t, m, "l")
+	if len(m.rows) != 7 || m.label(m.rows[6]) != "later" {
+		t.Fatalf("rows %d:\n%s", len(m.rows), m.View())
+	}
+}
+
+// waitMirror waits until the client knows the element at path.
+func waitMirror(t *testing.T, m model, path string) {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		ctx, cancel := m.context()
+		_, err := m.app.client.IdentifierPath(ctx, path)
+		cancel()
+		if err == nil {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("%s not in mirror: %v", path, err)
+		}
+		time.Sleep(time.Millisecond)
+	}
+}
+
 func TestSubscribe(t *testing.T) {
 	m, p, _ := start(t)
 	m = press(t, m, "l", "j", "l", "l") // gain selected
