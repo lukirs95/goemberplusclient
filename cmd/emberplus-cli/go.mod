@@ -6,7 +6,7 @@ require (
 	github.com/charmbracelet/bubbles v1.0.0
 	github.com/charmbracelet/bubbletea v1.3.10
 	github.com/charmbracelet/lipgloss v1.1.0
-	github.com/lukirs95/goemberplusclient v0.0.0
+	github.com/lukirs95/goemberplusclient v1.2.0
 )
 
 require (
@@ -32,7 +32,3 @@ require (
 	golang.org/x/sys v0.38.0 // indirect
 	golang.org/x/text v0.3.8 // indirect
 )
-
-// The CLI is developed together with the library. Once the library is
-// tagged, this can be replaced by a released version.
-replace github.com/lukirs95/goemberplusclient => ../..
